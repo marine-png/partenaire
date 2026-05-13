@@ -1,0 +1,34 @@
+name: Partner Monitor
+
+on:
+  schedule:
+    # 7h UTC = 8h Paris CET (hiver) / 9h Paris CEST (été)
+    - cron: "0 7 * * 1-5"
+  workflow_dispatch:  # permet un déclenchement manuel depuis GitHub
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run monitor
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
+          RECIPIENT_NAME: ${{ secrets.RECIPIENT_NAME }}
+        run: python monitor.py

@@ -36,7 +36,7 @@ SITES = [
         "type": "sitemap",
         "sitemap_url": "https://www.agcentraleimmo.com/sitemap.xml",
         # Match individual listing pages: /1552-bel-appartement.html
-        "listing_pattern": r"agcentraleimmo\.com/\d{3,5}-[a-z]",
+        "listing_pattern": r"agcentraleimmo\.com/\d+-[a-z0-9]",
         "base_url": "https://www.agcentraleimmo.com",
     },
     {

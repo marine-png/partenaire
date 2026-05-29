@@ -10,6 +10,15 @@ from scrapers.base import Listing
 log = logging.getLogger(__name__)
 
 
+def title_from_url(url: str) -> str:
+    """Extract readable title from URL slug when title is unknown."""
+    import re
+    path = url.rstrip("/").split("/")[-1]
+    path = re.sub(r"\.html?$", "", path)
+    path = re.sub(r"^\d+-", "", path)  # remove leading numeric ID
+    return path.replace("-", " ").replace("+", " ").title() or "Onbekende titel"
+
+
 def format_price(price: int | None) -> str:
     if price is None:
         return "prijs onbekend"
@@ -47,7 +56,7 @@ def build_body(all_changes: dict[str, dict]) -> str:
         if new:
             lines.append(f"\nNIEUW TOEGEVOEGD ({len(new)}):")
             for listing in new:
-                title = listing.title or "Onbekende titel"
+                title = listing.title or title_from_url(listing.url)
                 price = format_price(listing.price)
                 lines.append(f"• {title} — {price}")
                 lines.append(f"  {listing.url}")
@@ -55,7 +64,7 @@ def build_body(all_changes: dict[str, dict]) -> str:
         if removed:
             lines.append(f"\nVERWIJDERD ({len(removed)}):")
             for row in removed:
-                title = row.get("title") or "Onbekende titel"
+                title = row.get("title") or title_from_url(row["listing_url"])
                 price = format_price(row.get("price"))
                 lines.append(f"• {title} — {price}")
                 lines.append(f"  {row['listing_url']}")

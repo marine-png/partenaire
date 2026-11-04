@@ -97,11 +97,12 @@ SITES = [
     },
     {
         "name": "Beautiful South 66",
-        "type": "sitemap",
-        "sitemap_url": "https://www.beautifulsouth66.com/sitemap-1.xml",
-        # Only French URLs
-        "listing_pattern": r"beautifulsouth66\.com/fr/propriete/",
+        # Sitemap keeps sold listings → read the "for sale" search results instead
+        "type": "apimo_site",
+        "list_url": "https://www.beautifulsouth66.com/fr/acheter",
         "base_url": "https://www.beautifulsouth66.com",
+        "notify": ["removed"],  # sold = gone from the for-sale list (Make can't see it)
+        "resync_until": "2026-11-10",  # switch from sitemap: old sold listings synced silently
     },
     {
         "name": "AMI09",
@@ -112,11 +113,12 @@ SITES = [
     },
     {
         "name": "Gélas Immobilier",
-        "type": "sitemap",
-        "sitemap_url": "https://gelas-immobilier.com/sitemap-1.xml",
-        # Only French URLs
-        "listing_pattern": r"gelas-immobilier\.com/fr/propriete/",
+        # Sitemap keeps sold listings → read the "for sale" search results instead
+        "type": "apimo_site",
+        "list_url": "https://gelas-immobilier.com/fr/ventes",
         "base_url": "https://gelas-immobilier.com",
+        "notify": ["removed"],  # sold = gone from the for-sale list (Make can't see it)
+        "resync_until": "2026-11-10",  # switch from sitemap: old sold listings synced silently
     },
     {
         "name": "Max Immo",
@@ -128,7 +130,10 @@ SITES = [
     },
     {
         "name": "Abafim",
-        "type": "abafim",
+        # Sitemap keeps sold listings → read the "for sale" search results instead
+        "type": "apimo_site",
+        "list_url": "https://abafim.fr/fr/acheter",
         "base_url": "https://abafim.fr",
+        "notify": ["removed"],  # sold = gone from the for-sale list (Make can't see it)
     },
 ]

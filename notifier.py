@@ -38,11 +38,16 @@ def build_body(all_changes: dict[str, dict]) -> str:
         new = changes.get("new", [])
         removed = changes.get("removed", [])
         price_changed = changes.get("price_changed", [])
+        sold = changes.get("sold", [])
+        alerts = changes.get("alerts", [])
 
-        n_total = len(new) + len(removed) + len(price_changed)
         summary_parts = []
+        if alerts:
+            summary_parts.append("⚠ ALERT")
         if new:
             summary_parts.append(f"{len(new)} nieuw")
+        if sold:
+            summary_parts.append(f"{len(sold)} verkocht")
         if removed:
             summary_parts.append(f"{len(removed)} verwijderd")
         if price_changed:
@@ -53,6 +58,11 @@ def build_body(all_changes: dict[str, dict]) -> str:
         lines.append(f"{site_name.upper()} — {summary}")
         lines.append("─" * 50)
 
+        if alerts:
+            lines.append("\n⚠ ALERT:")
+            for alert in alerts:
+                lines.append(f"• {alert}")
+
         if new:
             lines.append(f"\nNIEUW TOEGEVOEGD ({len(new)}):")
             for listing in new:
@@ -60,6 +70,14 @@ def build_body(all_changes: dict[str, dict]) -> str:
                 price = format_price(listing.price)
                 lines.append(f"• {title} — {price}")
                 lines.append(f"  {listing.url}")
+
+        if sold:
+            lines.append(f"\nVERKOCHT ({len(sold)}):")
+            for row in sold:
+                title = row.get("title") or title_from_url(row["listing_url"])
+                price = format_price(row.get("price"))
+                lines.append(f"• {title} — {price}")
+                lines.append(f"  {row['listing_url']}")
 
         if removed:
             lines.append(f"\nVERWIJDERD ({len(removed)}):")
@@ -96,12 +114,14 @@ def send_email(all_changes: dict[str, dict]) -> None:
     body = build_body(all_changes)
 
     total_changes = sum(
-        len(c["new"]) + len(c["removed"]) + len(c["price_changed"])
+        len(c["new"]) + len(c["removed"]) + len(c["price_changed"]) + len(c.get("sold", []))
         for c in all_changes.values()
     )
+    n_alerts = sum(len(c.get("alerts", [])) for c in all_changes.values())
     n_sites = len(all_changes)
+    alert_prefix = f"⚠ {n_alerts} alert(s) — " if n_alerts else ""
     subject = (
-        f"Partnerwebsites — {total_changes} wijziging(en) bij {n_sites} agentschap(pen) "
+        f"{alert_prefix}Partnerwebsites — {total_changes} wijziging(en) bij {n_sites} agentschap(pen) "
         f"— {datetime.now().strftime('%d/%m/%Y')}"
     )
 
@@ -118,7 +138,7 @@ def send_email(all_changes: dict[str, dict]) -> None:
             smtp.starttls()
             smtp.login(config.SMTP_USER, config.SMTP_PASSWORD)
             smtp.sendmail(config.SMTP_USER, recipients, msg.as_string())
-        log.info(f"Email sent to {recipients} — {total_changes} changes")
+        log.info(f"Email sent to {recipients} — {total_changes} changes, {n_alerts} alerts")
     except Exception as e:
         log.error(f"Failed to send email: {e}")
         raise

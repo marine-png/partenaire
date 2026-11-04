@@ -6,6 +6,9 @@ on:
     - cron: "0 7 * * 1-5"
   workflow_dispatch:  # permet un déclenchement manuel depuis GitHub
 
+permissions:
+  contents: write  # needed for the keep-alive commit below
+
 jobs:
   monitor:
     runs-on: ubuntu-latest
@@ -32,3 +35,19 @@ jobs:
           RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
           RECIPIENT_NAME: ${{ secrets.RECIPIENT_NAME }}
         run: python monitor.py
+
+      # GitHub disables scheduled workflows after 60 days without a commit.
+      # Commit once a month (only if the repo has been quiet for 30+ days).
+      - name: Keep workflow alive
+        if: always()
+        run: |
+          last_commit=$(git log -1 --format=%ct)
+          age_days=$(( ( $(date +%s) - last_commit ) / 86400 ))
+          echo "Last commit: $age_days days ago"
+          if [ "$age_days" -lt 30 ]; then exit 0; fi
+          echo "$(date -u '+%Y-%m-%d %H:%M UTC')" > last_run.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add last_run.txt
+          git commit -m "chore: keep workflow alive [skip ci]"
+          git push

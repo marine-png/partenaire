@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from supabase import create_client, Client
 
 import config
-from scrapers import sitemap, iad, hsb, maximmo, abafim
+from scrapers import sitemap, iad, hsb, maximmo, abafim, apimo_site
 from scrapers.base import Listing, fetch, extract_price
 from notifier import send_email
 
@@ -40,6 +40,7 @@ def scrape_site(site: dict) -> list[Listing]:
         "hsb": hsb.scrape,
         "maximmo": maximmo.scrape,
         "abafim": abafim.scrape,
+        "apimo_site": apimo_site.scrape,
     }
     fn = scraper_map.get(site["type"])
     if not fn:
@@ -255,8 +256,11 @@ def process_site(db: Client, site: dict, price_recheck_budget: list[int]) -> dic
 
     # ---- Mass-removal guard ----
     gone = [url for url in stored_by_url if url not in current_by_url]
+    # One-off resync after changing a site's source: mark gone listings silently
+    resync = bool(site.get("resync_until")) and NOW.date().isoformat() <= site["resync_until"]
     mass_removal = (
-        len(gone) >= config.MASS_REMOVAL_MIN_COUNT
+        not resync
+        and len(gone) >= config.MASS_REMOVAL_MIN_COUNT
         and len(gone) > config.MASS_REMOVAL_RATIO * len(stored_by_url)
     )
     if mass_removal:
@@ -297,6 +301,11 @@ def process_site(db: Client, site: dict, price_recheck_budget: list[int]) -> dic
             mark_removed(db, row["id"])
             changes["removed"].append(row)
             log.info(f"  - REMOVED: {url}")
+    if resync and len(changes["removed"]) > config.SOLD_BULK_LIMIT:
+        changes["alerts"].append(
+            f"{len(changes['removed'])} oude verkochte panden in één keer bijgewerkt (nieuwe bron: lijst te koop)."
+        )
+        changes["removed"] = []
 
     # ---- Existing listings: price checks ----
     for url, listing in current_by_url.items():
@@ -326,7 +335,8 @@ def process_site(db: Client, site: dict, price_recheck_budget: list[int]) -> dic
         old_price = row.get("price")
         if new_price is not None and old_price is not None and new_price != old_price:
             update_price(db, row, new_price)
-            changes["price_changed"].append((listing, old_price, new_price))
+            if not resync:  # old prices came from another source: align silently
+                changes["price_changed"].append((listing, old_price, new_price))
             log.info(f"  € PRICE: {url} {old_price} → {new_price}")
         else:
             touch_listing(db, row["id"], listing)

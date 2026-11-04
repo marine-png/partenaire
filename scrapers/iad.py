@@ -1,53 +1,47 @@
 from __future__ import annotations
-import re
 import logging
 
-from bs4 import BeautifulSoup
-
-from .base import Listing, fetch, _parse_french_price
+from .base import Listing, fetch
 
 log = logging.getLogger(__name__)
 
 
 def scrape(site: dict) -> list[Listing]:
-    """Scrape IAD France consultant profile page."""
-    r = fetch(site["url"])
+    """
+    Fetch one IAD consultant's own listings via IAD's agent API
+    (/api/agents/{username}). The HTML profile page also shows other agents'
+    "biens similaires", so it's not used.
+    """
+    base = site["base_url"].rstrip("/")
+    username = site["agent_username"]
+    r = fetch(f"{base}/api/agents/{username}?locale=fr")
     if not r:
         return []
 
-    soup = BeautifulSoup(r.text, "lxml")
-    base = site["base_url"]
+    try:
+        data = r.json()
+    except ValueError:
+        log.error(f"  IAD: agent API did not return JSON for {username}")
+        return []
+
+    props = data.get("properties") or []
+    expected = data.get("propertyCount")
+    if expected is not None and expected != len(props):
+        log.warning(f"  IAD: propertyCount={expected} but {len(props)} properties returned")
+
     listings: list[Listing] = []
-
-    # IAD listing cards: links containing /annonce/ with a ref like r1234567
-    seen = set()
-    for a in soup.find_all("a", href=re.compile(r"/annonce/")):
-        href = a.get("href", "")
-        # Extract ref from URL end: /r1986326
-        ref_match = re.search(r"/(r\d+)$", href)
-        ref = ref_match.group(1) if ref_match else None
-
-        url = href if href.startswith("http") else base + href
-        if url in seen:
+    for p in props:
+        ref = p.get("propertyListingRef")
+        slug = (p.get("slugs") or {}).get("fr")
+        if not ref or not slug:
             continue
-        seen.add(url)
+        price = (p.get("price") or {}).get("main")
+        listings.append(Listing(
+            url=f"{base}/annonce/{slug}/r{ref}",
+            ref=f"r{ref}",
+            title=p.get("title"),  # e.g. "Maison à Mouzon (08210)"
+            price=int(price) if price else None,
+        ))
 
-        # Try to find price within the same card ancestor
-        card = a.find_parent(["article", "div", "li", "section"])
-        price = None
-        if card:
-            price = _parse_french_price(card.get_text(" ", strip=True))
-
-        # Try to find title
-        title = None
-        if card:
-            for tag in ["h2", "h3", "h4"]:
-                el = card.find(tag)
-                if el:
-                    title = el.get_text(strip=True)
-                    break
-
-        listings.append(Listing(url=url, ref=ref, title=title, price=price))
-
-    log.info(f"  IAD - Audrey Dumont: {len(listings)} listings")
+    log.info(f"  IAD - {username}: {len(listings)} listings")
     return listings

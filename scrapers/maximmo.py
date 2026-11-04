@@ -1,6 +1,5 @@
 from __future__ import annotations
 import re
-import json
 import logging
 
 from bs4 import BeautifulSoup
@@ -9,81 +8,56 @@ from .base import Listing, fetch, _parse_french_price
 
 log = logging.getLogger(__name__)
 
+MAX_PAGES = 20
+
 
 def scrape(site: dict) -> list[Listing]:
-    """Scrape Max Immo search results. All refs included — filter manually for 600./601."""
-    r = fetch(site["url"])
-    if not r:
-        log.warning("Max Immo: fetch failed — check URL or site structure")
-        return []
+    """
+    Scrape Max Immo search results (paginated, 30 per page).
+    Card = <a href="/ShowProperty?propertyId=N"> with head "REF | CITY" and a "Prix" picto.
+    Only refs starting with one of site["ref_prefixes"] (e.g. "600.", "601.") are kept.
+    """
+    prefixes = tuple(site.get("ref_prefixes", []))
+    base = site["base_url"].rstrip("/")
+    listings: list[Listing] = []
+    seen: set[str] = set()
 
-    # Try JSON response first
-    content_type = r.headers.get("Content-Type", "")
-    if "json" in content_type:
-        return _parse_json(r.json(), site["base_url"])
+    for page in range(1, MAX_PAGES + 1):
+        r = fetch(f"{site['url']}?page={page}")
+        if not r:
+            log.warning(f"Max Immo: fetch failed on page {page}")
+            return [] if page == 1 else listings
 
-    return _parse_html(r.text, site["base_url"])
+        soup = BeautifulSoup(r.text, "lxml")
+        cards = soup.find_all("a", href=re.compile(r"ShowProperty\?propertyId=\d+"))
+        if not cards:
+            break
 
+        for a in cards:
+            url = base + "/" + a["href"].lstrip("/")
+            if url in seen:
+                continue
+            seen.add(url)
 
-def _parse_json(data: dict | list, base_url: str) -> list[Listing]:
-    listings = []
-    items = data if isinstance(data, list) else data.get("results", data.get("items", []))
-    for item in items:
-        url = item.get("url") or item.get("link") or item.get("Url") or ""
-        if url and not url.startswith("http"):
-            url = base_url.rstrip("/") + "/" + url.lstrip("/")
-        ref = str(item.get("ref") or item.get("Ref") or item.get("reference") or "")
-        title = item.get("title") or item.get("Title") or item.get("name") or ""
-        price_raw = item.get("price") or item.get("Price") or item.get("prix") or 0
-        try:
-            price = int(float(str(price_raw).replace(" ", "").replace(".", "").replace(",", "")))
-            price = price if 5_000 <= price <= 50_000_000 else None
-        except (ValueError, TypeError):
-            price = None
-        if url:
-            listings.append(Listing(url=url, ref=ref or None, title=title or None, price=price))
-    log.info(f"  Max Immo (JSON): {len(listings)} listings")
-    return listings
+            head = a.select_one(".property-summary-head")
+            head_text = head.get_text(" ", strip=True) if head else ""
+            ref_match = re.match(r"(\d{3}\.\d{5})", head_text)
+            ref = ref_match.group(1) if ref_match else None
+            if prefixes and not (ref and ref.startswith(prefixes)):
+                continue
 
+            # Price has its own picto block — don't parse the whole card
+            # (rooms count sits right before the price: "3 420 000 €")
+            price_block = a.find(attrs={"title": "Prix"})
+            price = _parse_french_price(price_block.get_text(" ", strip=True)) if price_block else None
 
-def _parse_html(html: str, base_url: str) -> list[Listing]:
-    soup = BeautifulSoup(html, "lxml")
-    listings = []
-    seen = set()
+            img = a.find("img", alt=True)
+            city = head_text.split("|", 1)[1].strip() if "|" in head_text else ""
+            title = (img["alt"].strip().capitalize() if img and img["alt"].strip() else None)
+            if title and city:
+                title = f"{title} — {city.title()}"
 
-    # Look for listing links — Max Immo uses /Property/Detail/ID pattern
-    for a in soup.find_all("a", href=re.compile(r"/(Property|Detail|Bien|Annonce)/", re.I)):
-        href = a.get("href", "")
-        url = href if href.startswith("http") else base_url.rstrip("/") + href
-        if url in seen:
-            continue
-        seen.add(url)
+            listings.append(Listing(url=url, ref=ref, title=title, price=price))
 
-        card = a.find_parent(["article", "div", "li", "tr"])
-        price = None
-        title = None
-        ref = None
-
-        if card:
-            text = card.get_text(" ", strip=True)
-            price = _parse_french_price(text)
-            ref_match = re.search(r"[Nn]o\.?\s*[Dd]ossier\s*:?\s*([\d\.]+)", text)
-            if ref_match:
-                ref = ref_match.group(1)
-            for tag in ["h2", "h3", "h4"]:
-                el = card.find(tag)
-                if el:
-                    title = el.get_text(strip=True)
-                    break
-
-        listings.append(Listing(url=url, ref=ref, title=title, price=price))
-
-    if not listings:
-        log.warning(
-            "Max Immo: no listings found in HTML. "
-            "The site may use JavaScript rendering or a different URL pattern. "
-            f"Page title: {soup.find('title') and soup.find('title').get_text()}"
-        )
-
-    log.info(f"  Max Immo (HTML): {len(listings)} listings")
+    log.info(f"  Max Immo: {len(listings)} listings (prefixes {prefixes or 'all'})")
     return listings

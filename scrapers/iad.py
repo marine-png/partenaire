@@ -6,6 +6,22 @@ from .base import Listing, fetch
 log = logging.getLogger(__name__)
 
 
+def _items(props) -> list[dict]:
+    """Listings from the 'properties' field: a plain list (old API) or, since Nov 2026,
+    {"type": ..., "all": {"items": [...], "totalItems": n}} — any nested "items" list."""
+    if isinstance(props, list):
+        return [p for p in props if isinstance(p, dict)]
+    out: list[dict] = []
+    if isinstance(props, dict):
+        for k, v in props.items():
+            if k == "items" and isinstance(v, list):
+                out += [p for p in v if isinstance(p, dict)]
+            elif isinstance(v, (dict, list)):
+                out += _items(v) if isinstance(v, dict) else []
+    seen: set = set()
+    return [p for p in out if not (p.get("propertyListingRef") in seen or seen.add(p.get("propertyListingRef")))]
+
+
 def scrape(site: dict) -> list[Listing]:
     """
     Fetch one IAD consultant's own listings via IAD's agent API
@@ -24,7 +40,7 @@ def scrape(site: dict) -> list[Listing]:
         log.error(f"  IAD: agent API did not return JSON for {username}")
         return []
 
-    props = data.get("properties") or []
+    props = _items(data.get("properties"))
     expected = data.get("propertyCount")
     if expected is not None and expected != len(props):
         log.warning(f"  IAD: propertyCount={expected} but {len(props)} properties returned")

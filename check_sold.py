@@ -4,13 +4,12 @@ Sold check quotidien — vérifie le statut des biens 'En cours' dans le Google 
 - Envoie un email récapitulatif avec les liens ; Marine traite les vendus elle-même.
 
 Règles par partenaire (HTTP uniquement, sans Playwright) :
-  AC, DA, AD, AUDR, SOI, TCY, ABF, BFS  → redirect vers homepage = vendu
-  SOV                                    → page biens-vendus + matching par ID numérique
+  AC, DA, AD, AUDR, ABF, BFS             → redirect vers homepage = vendu
+  SOI, SOV (Sovimo), TCY (PY), GCI       → pages "biens vendus" (ces sites gardent les vendus en ligne)
   CPA                                    → texte "aucun résultat"
   CPSB                                   → texte "page non trouvée"
   MI, Mi                                 → texte "le bien cherché n'existe pas"
   MIH, ISB, LV, WE                       → 404 ou page "not found"
-  GCI                                    → page biens-vendus + URL matching
   OBI                                    → skip (Cloudflare, invérifiable)
   FSNL                                   → skip
 """
@@ -46,7 +45,7 @@ HEADERS = {
 SKIP_CODES = {"FSNL", "OBI"}
 
 # Redirect vers homepage = vendu
-HOMEPAGE_REDIRECT_CODES = {"AC", "DA", "AD", "AUDR", "SOI", "TCY", "ABF", "BFS"}
+HOMEPAGE_REDIRECT_CODES = {"AC", "DA", "AD", "AUDR", "ABF", "BFS"}
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -130,88 +129,94 @@ def check_one(row_idx: int, ref: str, code: str, url: str) -> dict:
             return {**base, "sold": True, "reason": "404_isb"}
         return {**base, "sold": False, "reason": f"ok_{status}"}
 
-    if code == "GCI":
-        return {**base, "sold": None, "reason": "gci_defer"}
-
     # Default: LV, WE, and others
     if status == 404:
         return {**base, "sold": True, "reason": "404"}
     return {**base, "sold": False, "reason": f"ok_{status}"}
 
 
-# ─── GCI: sold page ────────────────────────────────────────────────────────────
+# ─── Sold pages (sites that keep sold listings online) ───────────────────────
 
-def check_gci_sold_page(gci_rows: list[dict]) -> list[dict]:
-    log.info("  GCI: chargement page biens-vendus...")
-    status, _, text_raw = http_check("https://gelas-immobilier.com/fr/biens-vendus", timeout=20)
-    if not text_raw or status != 200:
-        log.warning(f"  Page GCI vendus inaccessible (status={status})")
-        return [{**r, "sold": None, "reason": "gci_page_unavailable"} for r in gci_rows]
-
-    sold_hrefs = set(re.findall(r'href=["\']([^"\']+propriete[^"\']+)["\']', text_raw))
-    sold_hrefs |= set(re.findall(r'href=["\']([^"\']+/vente[^"\']+)["\']', text_raw))
-
-    results = []
-    for r in gci_rows:
-        our_path = urlparse(r["url"].lower()).path.rstrip("/")
-        matched = any(
-            our_path in href.lower() or urlparse(href).path.rstrip("/") == our_path
-            for href in sold_hrefs
-        )
-        if matched:
-            results.append({**r, "sold": True, "reason": "gci_sold_page"})
-        else:
-            s, _, t = http_check(r["url"])
-            if s == 404:
-                results.append({**r, "sold": True, "reason": "404"})
-            else:
-                results.append({**r, "sold": False, "reason": f"ok_{s}"})
-    return results
-
-
-# ─── Sovimo: sold biens page ───────────────────────────────────────────────────
-
-def _extract_sovimo_prop_id(url: str) -> str | None:
-    """Extract numeric property ID from last path segment of a Sovimo vente URL."""
-    last = url.rstrip("/").split("/")[-1]
-    m = re.match(r"^(\d+)-", last)
-    if m and int(m.group(1)) > 10:  # exclude pagination numbers (1-10)
-        return m.group(1)
+def fetch_text(url: str, timeout: int = 30, tries: int = 3) -> str | None:
+    """GET with retries (partner sites are sometimes slow from GitHub runners)."""
+    for attempt in range(tries):
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=timeout)
+            if r.status_code == 200:
+                return r.text
+            if r.status_code in (404, 410):
+                return None
+        except requests.RequestException:
+            pass
+        time.sleep(3 * (attempt + 1))
     return None
 
 
-def check_sovimo_sold_page(sov_rows: list[dict]) -> list[dict]:
-    log.info("  SOV: chargement pages biens-vendus...")
-    sold_ids: set[str] = set()
-    for page in range(1, 200):
-        status, _, text = http_check(
-            f"https://www.sovimo-immobilier-confolens.fr/biens-vendus/{page}", timeout=15
-        )
-        if status != 200:
-            break
-        hrefs = re.findall(r'href="(/vente/[^"]+)"', text)
-        page_ids = {
-            pid for h in hrefs if (pid := _extract_sovimo_prop_id(h))
-        }
-        if not page_ids:
-            break
-        sold_ids |= page_ids
+def _slug_id(url: str) -> str | None:
+    """Sovimo / PY: /vente/<ville>/<type>/4944-slug/ → '4944'."""
+    m = re.match(r"^(\d+)-", url.rstrip("/").split("/")[-1])
+    return m.group(1) if m and int(m.group(1)) > 10 else None   # > 10 skips pagination links
 
-    log.info(f"  SOV: {len(sold_ids)} biens vendus trouvés sur la page")
 
-    results = []
-    for r in sov_rows:
-        prop_id = _extract_sovimo_prop_id(r["url"])
-        if prop_id and prop_id in sold_ids:
-            results.append({**r, "sold": True, "reason": "sovimo_sold_page"})
+def _gci_id(url: str) -> str | None:
+    """Gélas: /fr/propriete/vente+maison+ville+slug+87171219 → '87171219'."""
+    m = re.search(r"\+(\d{6,})/?$", urlparse(url).path)
+    return m.group(1) if m else None
+
+
+def collect_sold_ids(page_tpl: str, extract, max_pages: int = 100) -> set[str] | None:
+    """IDs on every page of a 'biens vendus' listing. None = first page unreachable."""
+    sold: set[str] = set()
+    for page in range(1, max_pages + 1):
+        text = fetch_text(page_tpl.format(page=page))
+        if text is None:
+            return sold if page > 1 else None
+        ids = extract(text)
+        if not ids or ids <= sold:      # empty or repeated last page
+            break
+        sold |= ids
+    return sold
+
+
+SOLD_PAGES = {
+    # codes: (sold page template, ids found on that page, id of our listing URL)
+    ("SOI", "SOV"): ("https://www.sovimo-immobilier-confolens.fr/biens-vendus/{page}",
+                     lambda t: {i for h in re.findall(r'href="([^"]*/vente/[^"]+)"', t) if (i := _slug_id(h))},
+                     _slug_id),
+    ("TCY",):       ("http://www.py-immobilier.fr/biens-vendus/{page}",
+                     lambda t: {i for h in re.findall(r'href="([^"]*/vente/[^"]+)"', t) if (i := _slug_id(h))},
+                     _slug_id),
+    ("GCI",):       ("https://gelas-immobilier.com/fr/biens-vendus?page={page}",
+                     lambda t: set(re.findall(r'data-property-id="(\d+)"', t)),
+                     _gci_id),
+}
+SOLD_PAGE_CODES = {c for codes in SOLD_PAGES for c in codes}
+
+
+def check_sold_page(codes: tuple, rows: list[dict]) -> list[dict]:
+    tpl, extract, own_id = SOLD_PAGES[codes]
+    sold_ids = collect_sold_ids(tpl, extract)
+    log.info(f"  {'/'.join(codes)}: {('page inaccessible' if sold_ids is None else f'{len(sold_ids)} vendus sur le site')}")
+    out = []
+    for r in rows:
+        pid = own_id(r["url"])
+        if sold_ids is None:
+            out.append({**r, "sold": False, "reason": "__unchecked__sold_page_down"})
+        elif pid and pid in sold_ids:
+            out.append({**r, "sold": True, "reason": "sold_page"})
+        elif pid is None:
+            # URL without listing ID (search link): only a dead page tells us something
+            status, final_url, _ = http_check(r["url"])
+            gone = status in (404, 410) or (final_url and is_homepage(r["url"], final_url) and "not-found" in final_url)
+            out.append({**r, "sold": bool(gone), "reason": "404" if gone else "no_id"})
         else:
-            results.append({**r, "sold": False, "reason": f"sov_id_not_found({prop_id})"})
-    return results
+            out.append({**r, "sold": False, "reason": "online"})
+    return out
 
 
 # ─── Email ─────────────────────────────────────────────────────────────────────
 
-def send_sold_email(sold: list[dict], unsure: list[dict]) -> None:
+def send_sold_email(sold: list[dict], unsure: list[dict], unchecked: dict[str, int]) -> None:
     today = datetime.now().strftime("%d/%m/%Y")
     lines = [
         f"Goedemorgen {config.RECIPIENT_NAME},",
@@ -238,6 +243,14 @@ def send_sold_email(sold: list[dict], unsure: list[dict]) -> None:
             lines.append(f"• [{r['code']}] {r['ref']} — {r['url']}")
         lines.append("")
 
+    if unchecked:
+        lines.append("─" * 50)
+        lines.append("NIET GECONTROLEERD (site onbereikbaar vandaag):")
+        lines.append("─" * 50)
+        for code, n in sorted(unchecked.items()):
+            lines.append(f"• [{code}] {n} panden")
+        lines.append("")
+
     lines += [
         "─" * 50,
         "",
@@ -260,7 +273,7 @@ def send_sold_email(sold: list[dict], unsure: list[dict]) -> None:
         smtp.login(config.SMTP_USER, config.SMTP_PASSWORD)
         smtp.sendmail(config.SMTP_USER, recipients, msg.as_string())
 
-    log.info(f"Email sold-check envoyé: {len(sold)} vendus, {len(unsure)} incertains")
+    log.info(f"Email sold-check envoyé: {len(sold)} vendus, {len(unsure)} incertains, non vérifiés {unchecked}")
 
 
 # ─── Main ──────────────────────────────────────────────────────────────────────
@@ -292,43 +305,42 @@ def run_sold_check() -> None:
 
     log.info(f"{len(en_cours)} biens 'En cours' à vérifier")
 
-    gci_rows   = [r for r in en_cours if r["code"] == "GCI"]
-    sov_rows   = [r for r in en_cours if r["code"] == "SOV"]
-    http_rows  = [r for r in en_cours if r["code"] not in ("GCI", "SOV")]
+    http_rows = [r for r in en_cours if r["code"] not in SOLD_PAGE_CODES]
 
-    # Phase 1: HTTP checks
+    # Phase 1: one HTTP request per listing (8 workers: partner sites block bursts)
     results: dict[int, dict] = {}
-    with ThreadPoolExecutor(max_workers=30) as pool:
-        futures = {
-            pool.submit(check_one, r["row"], r["ref"], r["code"], r["url"]): r
-            for r in http_rows
-        }
-        for fut in as_completed(futures):
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        for fut in as_completed([pool.submit(check_one, r["row"], r["ref"], r["code"], r["url"]) for r in http_rows]):
             res = fut.result()
             results[res["row"]] = res
 
-    # Phase 2: GCI sold page
-    if gci_rows:
-        for r in check_gci_sold_page(gci_rows):
-            results[r["row"]] = r
-
-    # Phase 3: Sovimo sold page
-    if sov_rows:
-        for r in check_sovimo_sold_page(sov_rows):
-            results[r["row"]] = r
+    # Phase 2: partners that keep sold listings online → their "biens vendus" pages
+    for codes in SOLD_PAGES:
+        rows_ = [r for r in en_cours if r["code"] in codes]
+        if rows_:
+            for r in check_sold_page(codes, rows_):
+                results[r["row"]] = r
 
     all_results = list(results.values())
     sold   = [r for r in all_results if r.get("sold") is True]
     unsure = [r for r in all_results if r.get("sold") is None]
 
-    log.info(f"Résultats: {len(sold)} vendus, {len(unsure)} incertains, {len(all_results) - len(sold) - len(unsure)} en ligne")
+    # Per-partner summary; a partner mostly unreachable today is flagged in the mail
+    by_code: dict[str, dict[str, int]] = {}
+    for r in all_results:
+        st = "vendu" if r["sold"] else ("non_vérifié" if str(r["reason"]).startswith("__") else
+                                        "skip" if r["reason"] == "skip" else "en_ligne")
+        by_code.setdefault(r["code"], {}).setdefault(st, 0)
+        by_code[r["code"]][st] += 1
+    for code, c in sorted(by_code.items()):
+        log.info(f"  [{code}] {c}")
+    unchecked = {code: c["non_vérifié"] for code, c in by_code.items()
+                 if c.get("non_vérifié", 0) >= max(3, 0.3 * sum(c.values()))}
 
-    # Send email if anything found
-    if sold or unsure:
-        try:
-            send_sold_email(sold, unsure)
-        except Exception as e:
-            log.error(f"Echec envoi email sold-check: {e}")
+    log.info(f"Résultats: {len(sold)} vendus, {len(unsure)} incertains, non vérifiés {unchecked}")
+
+    if sold or unsure or unchecked:
+        send_sold_email(sold, unsure, unchecked)   # a failed mail must fail the run (visible on GitHub)
 
     log.info("=== Sold check terminé ===")
 

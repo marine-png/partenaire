@@ -12,11 +12,9 @@ SMTP_USER = os.environ.get("SMTP_USER", "contact@sauterenfrance.com")
 SMTP_PASSWORD = os.environ["SMTP_PASSWORD"]
 
 # Comma-separated list of recipient emails
-RECIPIENT_EMAILS = os.environ.get(
-    "RECIPIENT_EMAILS",
-    "contact@sauterenfrance.com,info@ln-ts.nl"
-)
-RECIPIENT_NAME = os.environ.get("RECIPIENT_NAME", "Marine en Anita")
+# "or": a workflow passing a missing secret sets the variable to "" — fall back to the default
+RECIPIENT_EMAILS = os.environ.get("RECIPIENT_EMAILS") or "contact@sauterenfrance.com,info@ln-ts.nl"
+RECIPIENT_NAME = os.environ.get("RECIPIENT_NAME") or "Marine en Anita"
 SENDER_NAME = "MarineAI"
 
 # Max individual listing pages to fetch per run for price re-checks

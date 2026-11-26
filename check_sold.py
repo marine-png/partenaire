@@ -1,7 +1,7 @@
 """
 Sold check quotidien — vérifie le statut des biens 'En cours' dans le Google Sheet Apimo.
-- Met en gras les lignes vendues dans le sheet.
-- Envoie un email récapitulatif.
+- Lecture seule du sheet (rien n'est modifié).
+- Envoie un email récapitulatif avec les liens ; Marine traite les vendus elle-même.
 
 Règles par partenaire (HTTP uniquement, sans Playwright) :
   AC, DA, AD, AUDR, SOI, TCY, ABF, BFS  → redirect vers homepage = vendu
@@ -28,8 +28,6 @@ from urllib.parse import urlparse
 
 import requests
 import gspread
-from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
 
 import config
 
@@ -211,77 +209,6 @@ def check_sovimo_sold_page(sov_rows: list[dict]) -> list[dict]:
     return results
 
 
-# ─── Google Sheets ─────────────────────────────────────────────────────────────
-
-def get_service_account_creds() -> Credentials:
-    """Load service account from env var (CI) or local file (dev)."""
-    sa_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
-    if sa_json:
-        info = json.loads(sa_json)
-        return Credentials.from_service_account_info(
-            info, scopes=["https://www.googleapis.com/auth/spreadsheets"]
-        )
-    # Fallback: local file (dev only)
-    local_file = os.path.join(os.path.dirname(__file__), "..", "apimo-integration", "google_service_account.json")
-    return Credentials.from_service_account_file(
-        local_file, scopes=["https://www.googleapis.com/auth/spreadsheets"]
-    )
-
-
-def already_bold_rows() -> set[int]:
-    """Rows whose column A is already bold = sold reported on an earlier day (not mailed again)."""
-    service = build("sheets", "v4", credentials=get_service_account_creds())
-    data = service.spreadsheets().get(
-        spreadsheetId=SPREADSHEET_ID,
-        ranges=[f"'{SHEET_NAME}'!A:A"],
-        fields="sheets.data.rowData.values.effectiveFormat.textFormat.bold",
-    ).execute()
-    rows = data["sheets"][0]["data"][0].get("rowData", [])
-    return {
-        i for i, rd in enumerate(rows, start=1)
-        if (rd.get("values") or [{}])[0].get("effectiveFormat", {}).get("textFormat", {}).get("bold")
-    }
-
-
-def bold_rows_in_sheet(sold_rows: list[int]) -> None:
-    if not sold_rows:
-        return
-    creds = get_service_account_creds()
-    service = build("sheets", "v4", credentials=creds)
-
-    meta = service.spreadsheets().get(spreadsheetId=SPREADSHEET_ID).execute()
-    sheet_id = next(
-        s["properties"]["sheetId"]
-        for s in meta["sheets"]
-        if s["properties"]["title"] == SHEET_NAME
-    )
-
-    requests_body = [
-        {
-            "repeatCell": {
-                "range": {
-                    "sheetId": sheet_id,
-                    "startRowIndex": row_num - 1,
-                    "endRowIndex": row_num,
-                },
-                "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}},
-                "fields": "userEnteredFormat.textFormat.bold",
-            }
-        }
-        for row_num in sold_rows
-    ]
-
-    for i in range(0, len(requests_body), 200):
-        service.spreadsheets().batchUpdate(
-            spreadsheetId=SPREADSHEET_ID,
-            body={"requests": requests_body[i : i + 200]},
-        ).execute()
-        if i + 200 < len(requests_body):
-            time.sleep(1)
-
-    log.info(f"  {len(sold_rows)} ligne(s) mise(s) en gras dans le sheet")
-
-
 # ─── Email ─────────────────────────────────────────────────────────────────────
 
 def send_sold_email(sold: list[dict], unsure: list[dict]) -> None:
@@ -297,7 +224,7 @@ def send_sold_email(sold: list[dict], unsure: list[dict]) -> None:
 
     if sold:
         lines.append("─" * 50)
-        lines.append(f"VERKOCHT ({len(sold)}) — in vet gemarkeerd in het sheet:")
+        lines.append(f"VERKOCHT ({len(sold)}):")
         lines.append("─" * 50)
         for r in sorted(sold, key=lambda x: x["code"]):
             lines.append(f"• [{r['code']}] {r['ref']} — {r['url']}")
@@ -363,9 +290,7 @@ def run_sold_check() -> None:
                 "url":  r[5].strip() if len(r) > 5 else "",
             })
 
-    bold = already_bold_rows()
-    en_cours = [r for r in en_cours if r["row"] not in bold]
-    log.info(f"{len(en_cours)} biens 'En cours' à vérifier ({len(bold)} lignes déjà en gras ignorées)")
+    log.info(f"{len(en_cours)} biens 'En cours' à vérifier")
 
     gci_rows   = [r for r in en_cours if r["code"] == "GCI"]
     sov_rows   = [r for r in en_cours if r["code"] == "SOV"]
@@ -397,10 +322,6 @@ def run_sold_check() -> None:
     unsure = [r for r in all_results if r.get("sold") is None]
 
     log.info(f"Résultats: {len(sold)} vendus, {len(unsure)} incertains, {len(all_results) - len(sold) - len(unsure)} en ligne")
-
-    # Bold sold rows in sheet
-    if sold:
-        bold_rows_in_sheet([r["row"] for r in sold])
 
     # Send email if anything found
     if sold or unsure:

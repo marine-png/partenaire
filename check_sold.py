@@ -99,8 +99,8 @@ def check_one(row_idx: int, ref: str, code: str, url: str) -> dict:
     if status is None:
         return {**base, "sold": False, "reason": text}
 
-    if status == 404:
-        return {**base, "sold": True, "reason": "404"}
+    if status in (404, 410):
+        return {**base, "sold": True, "reason": str(status)}
 
     if code in HOMEPAGE_REDIRECT_CODES:
         if is_homepage(url, final_url):
@@ -228,6 +228,21 @@ def get_service_account_creds() -> Credentials:
     )
 
 
+def already_bold_rows() -> set[int]:
+    """Rows whose column A is already bold = sold reported on an earlier day (not mailed again)."""
+    service = build("sheets", "v4", credentials=get_service_account_creds())
+    data = service.spreadsheets().get(
+        spreadsheetId=SPREADSHEET_ID,
+        ranges=[f"'{SHEET_NAME}'!A:A"],
+        fields="sheets.data.rowData.values.effectiveFormat.textFormat.bold",
+    ).execute()
+    rows = data["sheets"][0]["data"][0].get("rowData", [])
+    return {
+        i for i, rd in enumerate(rows, start=1)
+        if (rd.get("values") or [{}])[0].get("effectiveFormat", {}).get("textFormat", {}).get("bold")
+    }
+
+
 def bold_rows_in_sheet(sold_rows: list[int]) -> None:
     if not sold_rows:
         return
@@ -348,7 +363,9 @@ def run_sold_check() -> None:
                 "url":  r[5].strip() if len(r) > 5 else "",
             })
 
-    log.info(f"{len(en_cours)} biens 'En cours' à vérifier")
+    bold = already_bold_rows()
+    en_cours = [r for r in en_cours if r["row"] not in bold]
+    log.info(f"{len(en_cours)} biens 'En cours' à vérifier ({len(bold)} lignes déjà en gras ignorées)")
 
     gci_rows   = [r for r in en_cours if r["code"] == "GCI"]
     sov_rows   = [r for r in en_cours if r["code"] == "SOV"]

@@ -307,19 +307,19 @@ def run_sold_check() -> None:
 
     http_rows = [r for r in en_cours if r["code"] not in SOLD_PAGE_CODES]
 
-    # Phase 1: one HTTP request per listing (8 workers: partner sites block bursts)
     results: dict[int, dict] = {}
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        for fut in as_completed([pool.submit(check_one, r["row"], r["ref"], r["code"], r["url"]) for r in http_rows]):
-            res = fut.result()
-            results[res["row"]] = res
-
-    # Phase 2: partners that keep sold listings online → their "biens vendus" pages
+    # Phase 1 (before the per-listing burst, which can get us rate-limited): partners that keep sold listings online → their "biens vendus" pages
     for codes in SOLD_PAGES:
         rows_ = [r for r in en_cours if r["code"] in codes]
         if rows_:
             for r in check_sold_page(codes, rows_):
                 results[r["row"]] = r
+
+    # Phase 2: one HTTP request per listing (8 workers: partner sites block bursts)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        for fut in as_completed([pool.submit(check_one, r["row"], r["ref"], r["code"], r["url"]) for r in http_rows]):
+            res = fut.result()
+            results[res["row"]] = res
 
     all_results = list(results.values())
     sold   = [r for r in all_results if r.get("sold") is True]
